@@ -55,11 +55,12 @@ class StoredFileSerializer(serializers.ModelSerializer):
     public_url = serializers.SerializerMethodField()
     download_url = serializers.SerializerMethodField()
     last_downloaded_at = serializers.DateTimeField(allow_null=True)
+    owner = serializers.IntegerField(source="owner_id", read_only=True)
 
     class Meta:
         model = StoredFile
         fields = [
-            "id", "original_name", "comment", "size",
+            "id", "owner", "original_name", "comment", "size",
             "uploaded_at", "last_downloaded_at",
             "public_url", "download_url"
         ]

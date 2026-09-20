@@ -1,32 +1,11 @@
-# Python
+.venv/
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-
-# Django
-*.log
 db.sqlite3
-media/
-staticfiles/
-
-# Environment
 .env
-
-# Virtual environments
-venv/
-.venv/
-env/
-
-# IDE
-.vscode/
-.idea/
-
-# Node
-node_modules/
+media/
 frontend/node_modules/
 frontend/dist/
-
-# OS
-.DS_Store
-Thumbs.db
+backend/frontend_dist/
+.idea/
+.vscode/

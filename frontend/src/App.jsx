@@ -1,799 +1,299 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useLocation, Link, Routes, Route, Navigate } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "./api";
 import { validateRegistration } from "./validation";
 
-function Layout({ user, onLogout }) {
-  const navigate = useNavigate();
-
-  async function logout() {
-    try {
-      await api.logout();
-    } finally {
-      onLogout();
-      navigate("/", { replace: true });
-    }
-  }
-
+function Layout({ user, onLogout, children }) {
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <Link to={user ? "/files" : "/"}>Файловое хранилище</Link>
-        </div>
-
-        {user && (
-          <nav>
-            {user.is_admin && <Link to="/admin">Администрирование</Link>}
-            <Link to="/files">Файлы</Link>
-            <span className="user-name">{user.full_name || user.login}</span>
-            <button onClick={logout}>Выйти</button>
-          </nav>
-        )}
+    <div className="app">
+      <header>
+        <Link className="brand" to="/">Файловое хранилище</Link>
+        <nav>
+          <Link to="/">Главная</Link>
+          {user ? (
+            <>
+              <Link to="/files">Мои файлы</Link>
+              {user.is_admin && <Link to="/admin">Администрирование</Link>}
+              <span className="user-badge">{user.login}</span>
+              <button className="link-button" onClick={onLogout}>Выход</button>
+            </>
+          ) : (
+            <>
+              <Link to="/login">Вход</Link>
+              <Link to="/register">Регистрация</Link>
+            </>
+          )}
+        </nav>
       </header>
-
-      <main className="content">
-        <Routes>
-          <Route
-            path="/"
-            element={
-              user ? (
-                <Navigate to={user.is_admin ? "/admin" : "/files"} replace />
-              ) : (
-                <Home />
-              )
-            }
-          />
-
-          <Route
-            path="/login"
-            element={
-              user ? (
-                <Navigate to={user.is_admin ? "/admin" : "/files"} replace />
-              ) : (
-                <Login onLogin={onLogout} />
-              )
-            }
-          />
-
-          <Route
-            path="/register"
-            element={
-              user ? (
-                <Navigate to={user.is_admin ? "/admin" : "/files"} replace />
-              ) : (
-                <Register />
-              )
-            }
-          />
-
-          <Route
-            path="/files"
-            element={
-              user ? (
-                <FileManager user={user} />
-              ) : (
-                <Navigate to="/login" replace />
-              )
-            }
-          />
-
-          <Route
-            path="/files/:userId"
-            element={
-              user ? (
-                <FileManager user={user} />
-              ) : (
-                <Navigate to="/login" replace />
-              )
-            }
-          />
-
-          <Route
-            path="/admin"
-            element={
-              user?.is_admin ? (
-                <Admin />
-              ) : (
-                <Navigate to={user ? "/files" : "/login"} replace />
-              )
-            }
-          />
-
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
+      <main>{children}</main>
+      <footer>Дипломный проект · Django + PostgreSQL + React</footer>
     </div>
   );
 }
 
-function Home() {
+function Home({ user }) {
   return (
-    <div className="page-card">
-      <h1>Файловое хранилище</h1>
-
-      <p>
-        Веб-система для загрузки, хранения, просмотра и скачивания файлов.
-      </p>
-
-      <div className="actions">
-        <Link className="button" to="/login">
-          Войти
-        </Link>
-
-        <Link className="button secondary" to="/register">
-          Регистрация
-        </Link>
+    <section className="hero">
+      <div className="card">
+        <h1>Файловое хранилище</h1>
+        <p>Загружайте, храните, переименовывайте и скачивайте свои файлы.</p>
+        <p>Для каждого файла можно добавить комментарий и сформировать обезличенную публичную ссылку.</p>
+        <div className="actions">
+          {user ? <Link className="button" to="/files">Открыть хранилище</Link> : (
+            <>
+              <Link className="button" to="/register">Регистрация</Link>
+              <Link className="button secondary" to="/login">Вход</Link>
+            </>
+          )}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
-function Login({ onLogin }) {
-  const navigate = useNavigate();
-
-  const [form, setForm] = useState({
-    login: "",
-    password: "",
-  });
-
-  const [error, setError] = useState("");
-
-  function change(e) {
-    setForm({
-      ...form,
-      [e.target.name]: e.target.value,
-    });
-  }
-
-  async function submit(e) {
-    e.preventDefault();
-    setError("");
-
-    try {
-      const result = await api.login(form);
-
-      // Backend возвращает пользователя напрямую:
-      // { id, login, full_name, email, is_admin, ... }
-      const loggedUser = result?.user || result;
-
-      if (!loggedUser || !loggedUser.id) {
-        throw new Error("Сервер вернул некорректные данные пользователя.");
-      }
-
-      onLogin(loggedUser);
-
-      navigate(loggedUser.is_admin ? "/admin" : "/files", {
-        replace: true,
-      });
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  return (
-    <div className="form-card">
-      <h1>Вход</h1>
-
-      {error && <div className="error">{error}</div>}
-
-      <form onSubmit={submit}>
-        <label>
-          Логин
-          <input
-            name="login"
-            value={form.login}
-            onChange={change}
-            autoComplete="username"
-            required
-          />
-        </label>
-
-        <label>
-          Пароль
-          <input
-            type="password"
-            name="password"
-            value={form.password}
-            onChange={change}
-            autoComplete="current-password"
-            required
-          />
-        </label>
-
-        <button type="submit">Войти</button>
-      </form>
-
-      <p>
-        Нет аккаунта? <Link to="/register">Зарегистрироваться</Link>
-      </p>
-    </div>
-  );
+function FormError({ error }) {
+  return error ? <div className="error">{error}</div> : null;
 }
 
 function Register() {
   const navigate = useNavigate();
-
-  const [form, setForm] = useState({
-    login: "",
-    full_name: "",
-    email: "",
-    password: "",
-  });
-
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [form, setForm] = useState({ login: "", full_name: "", email: "", password: "" });
+  const [errors, setErrors] = useState({});
+  const [serverError, setServerError] = useState("");
 
   function change(e) {
-    setForm({
-      ...form,
-      [e.target.name]: e.target.value,
-    });
+    setForm({ ...form, [e.target.name]: e.target.value });
+    setErrors({ ...errors, [e.target.name]: "" });
   }
 
   async function submit(e) {
     e.preventDefault();
-    setError("");
-    setSuccess("");
-
-    const validationError = validateRegistration(form);
-
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
-
+    const clientErrors = validateRegistration(form);
+    setErrors(clientErrors);
+    if (Object.keys(clientErrors).length) return;
     try {
       await api.register(form);
+      navigate("/login", { state: { registered: true } });
+    } catch (err) {
+      setServerError(err.message);
+    }
+  }
 
-      setSuccess("Регистрация выполнена успешно.");
+  return <FormCard title="Регистрация">
+    <form onSubmit={submit}>
+      <label>Логин<input name="login" value={form.login} onChange={change} autoComplete="username" /></label>
+      <FormError error={errors.login} />
+      <label>Полное имя<input name="full_name" value={form.full_name} onChange={change} /></label>
+      <FormError error={errors.full_name} />
+      <label>Email<input type="email" name="email" value={form.email} onChange={change} autoComplete="email" /></label>
+      <FormError error={errors.email} />
+      <label>Пароль<input type="password" name="password" value={form.password} onChange={change} autoComplete="new-password" /></label>
+      <FormError error={errors.password} />
+      <FormError error={serverError} />
+      <button className="button" type="submit">Зарегистрироваться</button>
+    </form>
+  </FormCard>;
+}
 
-      setTimeout(() => {
-        navigate("/login", { replace: true });
-      }, 800);
+function Login({ onLogin }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [form, setForm] = useState({ login: "", password: "" });
+  const [error, setError] = useState("");
+  const registered = location.state?.registered;
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    try {
+      const result = await api.login(form);
+      onLogin(result.user);
+      navigate(result.user.is_admin ? "/admin" : "/files", { replace: true });
     } catch (err) {
       setError(err.message);
     }
   }
 
-  return (
-    <div className="form-card">
-      <h1>Регистрация</h1>
+  return <FormCard title="Вход">
+    {registered && <div className="success">Регистрация завершена. Теперь войдите.</div>}
+    <form onSubmit={submit}>
+      <label>Логин<input value={form.login} onChange={e => setForm({ ...form, login: e.target.value })} /></label>
+      <label>Пароль<input type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></label>
+      <FormError error={error} />
+      <button className="button" type="submit">Войти</button>
+    </form>
+  </FormCard>;
+}
 
-      {error && <div className="error">{error}</div>}
-      {success && <div className="success">{success}</div>}
+function FormCard({ title, children }) {
+  return <section className="narrow"><div className="card"><h2>{title}</h2>{children}</div></section>;
+}
 
-      <form onSubmit={submit}>
-        <label>
-          Логин
-          <input
-            name="login"
-            value={form.login}
-            onChange={change}
-            autoComplete="username"
-            required
-          />
-        </label>
-
-        <label>
-          ФИО
-          <input
-            name="full_name"
-            value={form.full_name}
-            onChange={change}
-            required
-          />
-        </label>
-
-        <label>
-          Email
-          <input
-            type="email"
-            name="email"
-            value={form.email}
-            onChange={change}
-            autoComplete="email"
-            required
-          />
-        </label>
-
-        <label>
-          Пароль
-          <input
-            type="password"
-            name="password"
-            value={form.password}
-            onChange={change}
-            autoComplete="new-password"
-            required
-          />
-        </label>
-
-        <button type="submit">Зарегистрироваться</button>
-      </form>
-
-      <p>
-        Уже есть аккаунт? <Link to="/login">Войти</Link>
-      </p>
-    </div>
-  );
+function Protected({ user, children, admin = false }) {
+  if (!user) return <Navigate to="/login" replace />;
+  if (admin && !user.is_admin) return <Navigate to="/files" replace />;
+  return children;
 }
 
 function FileManager({ user }) {
-  const location = useLocation();
-
-  const selectedUserId = location.pathname.startsWith("/files/")
-    ? Number(location.pathname.split("/").pop())
-    : null;
-
-  const [files, setFiles] = useState([]);
-  const [storageUser, setStorageUser] = useState(user);
-
-  const [loading, setLoading] = useState(true);
+  const [searchParams] = useSearchParams();
+  const selectedUser = user.is_admin ? searchParams.get("user_id") : null;
+  const [data, setData] = useState({ files: [], user: null });
   const [error, setError] = useState("");
-
-  const [uploadFile, setUploadFile] = useState(null);
   const [comment, setComment] = useState("");
-
+  const [upload, setUpload] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [message, setMessage] = useState("");
 
-  async function loadFiles() {
-    setLoading(true);
-    setError("");
-
+  async function load() {
     try {
-      const result = await api.files(selectedUserId);
-
-      /*
-       * Поддерживаем оба варианта ответа:
-       *
-       * 1. Backend:
-       *    [ ...files ]
-       *
-       * 2. Если позже API будет возвращать:
-       *    { files: [...], user: {...} }
-       */
-      if (Array.isArray(result)) {
-        setFiles(result);
-      } else {
-        setFiles(result?.files || []);
-
-        if (result?.user) {
-          setStorageUser(result.user);
-        }
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+      setData(await api.files(selectedUser));
+      setError("");
+    } catch (err) { setError(err.message); }
   }
 
-  useEffect(() => {
-    setStorageUser(user);
-    loadFiles();
-  }, [selectedUserId]);
+  useEffect(() => { load(); }, [selectedUser]);
 
-  async function upload(e) {
+  async function uploadFile(e) {
     e.preventDefault();
-
-    if (!uploadFile) {
-      setError("Выберите файл.");
-      return;
-    }
-
-    setError("");
-
+    if (!upload) return;
+    const fd = new FormData();
+    fd.append("file", upload);
+    fd.append("comment", comment);
     try {
-      const formData = new FormData();
-      formData.append("file", uploadFile);
-      formData.append("comment", comment);
-
-      await api.upload(formData, selectedUserId);
-
-      setUploadFile(null);
-      setComment("");
-
-      const input = document.getElementById("file-upload");
-
-      if (input) {
-        input.value = "";
-      }
-
-      await loadFiles();
-    } catch (err) {
-      setError(err.message);
-    }
+      await api.upload(fd, selectedUser);
+      setUpload(null); setComment(""); e.target.reset();
+      setMessage("Файл загружен.");
+      load();
+    } catch (err) { setError(err.message); }
   }
 
   async function deleteFile(id) {
-    if (!window.confirm("Удалить этот файл?")) {
-      return;
-    }
+    if (!confirm("Удалить файл?")) return;
+    try { await api.deleteFile(id); load(); }
+    catch (err) { setError(err.message); }
+  }
 
+  async function saveEdit(file) {
     try {
-      await api.deleteFile(id);
-      await loadFiles();
-    } catch (err) {
-      setError(err.message);
-    }
+      await api.updateFile(file.id, { name: file.original_name, comment: file.comment });
+      setEditing(null); load();
+    } catch (err) { setError(err.message); }
   }
 
-  function startEdit(file) {
-    setEditing({
-      id: file.id,
-      original_name: file.original_name,
-      comment: file.comment || "",
-    });
-  }
-
-  async function saveEdit() {
-    if (!editing) {
-      return;
-    }
-
+  async function share(file) {
     try {
-      await api.updateFile(editing.id, {
-        // Backend ожидает поле name.
-        name: editing.original_name,
-        comment: editing.comment,
-      });
-
-      setEditing(null);
-      await loadFiles();
-    } catch (err) {
-      setError(err.message);
-    }
+      const result = await api.shareFile(file.id);
+      await navigator.clipboard.writeText(result.public_url);
+      setMessage("Ссылка скопирована в буфер обмена.");
+    } catch (err) { setError(err.message); }
   }
 
-  async function shareFile(id) {
-    try {
-      const result = await api.shareFile(id);
+  const storageUser = data.user || user;
 
-      const link =
-        result.url ||
-        result.share_url ||
-        result.public_url;
-
-      if (!link) {
-        throw new Error("Сервер не вернул ссылку.");
-      }
-
-      await navigator.clipboard.writeText(
-        link.startsWith("http")
-          ? link
-          : `${window.location.origin}${link}`
-      );
-
-      alert("Ссылка скопирована в буфер обмена.");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  function downloadFile(id) {
-    window.open(`/api/files/${id}/download/`, "_blank");
-  }
-
-  function formatSize(bytes) {
-    if (bytes === 0) {
-      return "0 Б";
-    }
-
-    if (!bytes) {
-      return "—";
-    }
-
-    const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
-    const index = Math.floor(Math.log(bytes) / Math.log(1024));
-
-    return `${(bytes / Math.pow(1024, index)).toFixed(
-      index === 0 ? 0 : 2
-    )} ${units[index]}`;
-  }
-
-  function formatDate(value) {
-    if (!value) {
-      return "—";
-    }
-
-    return new Date(value).toLocaleString("ru-RU");
-  }
-
-  if (loading) {
-    return <div className="page-card">Загрузка...</div>;
-  }
-
-  return (
-    <div className="files-page">
-      <div className="page-header">
-        <div>
-          <h1>
-            Файловое хранилище
-            {storageUser?.login
-              ? ` — ${storageUser.login}`
-              : ""}
-          </h1>
-
-          {storageUser?.full_name && (
-            <p>{storageUser.full_name}</p>
-          )}
-        </div>
+  return <section>
+    <div className="page-head">
+      <div>
+        <h2>Хранилище: {storageUser.login}</h2>
+        <p>{storageUser.full_name} · {data.files.length} файлов</p>
       </div>
-
-      {error && <div className="error">{error}</div>}
-
-      <div className="upload-card">
-        <h2>Загрузить файл</h2>
-
-        <form onSubmit={upload}>
-          <input
-            id="file-upload"
-            type="file"
-            onChange={(e) =>
-              setUploadFile(e.target.files?.[0] || null)
-            }
-          />
-
-          <textarea
-            placeholder="Комментарий к файлу"
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-          />
-
-          <button type="submit">Загрузить</button>
-        </form>
-      </div>
-
-      <div className="files-card">
-        <h2>Файлы</h2>
-
-        {files.length === 0 ? (
-          <p>Файлов пока нет.</p>
-        ) : (
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>Имя</th>
-                  <th>Комментарий</th>
-                  <th>Размер</th>
-                  <th>Дата загрузки</th>
-                  <th>Последнее скачивание</th>
-                  <th>Действия</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {files.map((file) => (
-                  <tr key={file.id}>
-                    <td>{file.original_name}</td>
-
-                    <td>{file.comment || "—"}</td>
-
-                    <td>{formatSize(file.size)}</td>
-
-                    <td>{formatDate(file.uploaded_at)}</td>
-
-                    <td>{formatDate(file.last_downloaded_at)}</td>
-
-                    <td>
-                      <div className="file-actions">
-                        <button
-                          onClick={() => downloadFile(file.id)}
-                        >
-                          Скачать
-                        </button>
-
-                        <button
-                          onClick={() => startEdit(file)}
-                        >
-                          Изменить
-                        </button>
-
-                        <button
-                          onClick={() => shareFile(file.id)}
-                        >
-                          Ссылка
-                        </button>
-
-                        <button
-                          className="danger"
-                          onClick={() => deleteFile(file.id)}
-                        >
-                          Удалить
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {editing && (
-        <div className="modal">
-          <div className="modal-content">
-            <h2>Редактирование файла</h2>
-
-            <label>
-              Имя файла
-              <input
-                value={editing.original_name}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    original_name: e.target.value,
-                  })
-                }
-              />
-            </label>
-
-            <label>
-              Комментарий
-              <textarea
-                value={editing.comment}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    comment: e.target.value,
-                  })
-                }
-              />
-            </label>
-
-            <div className="actions">
-              <button onClick={saveEdit}>Сохранить</button>
-
-              <button
-                className="secondary"
-                onClick={() => setEditing(null)}
-              >
-                Отмена
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
-  );
+
+    <div className="card upload-card">
+      <h3>Загрузить файл</h3>
+      <form onSubmit={uploadFile} className="upload-form">
+        <input type="file" onChange={e => setUpload(e.target.files[0])} />
+        <input placeholder="Комментарий" value={comment} onChange={e => setComment(e.target.value)} />
+        <button className="button" type="submit">Загрузить</button>
+      </form>
+    </div>
+
+    <FormError error={error} />
+    {message && <div className="success">{message}</div>}
+
+    <div className="card table-wrap">
+      <table>
+        <thead><tr><th>Имя</th><th>Комментарий</th><th>Размер</th><th>Загружен</th><th>Последнее скачивание</th><th>Операции</th></tr></thead>
+        <tbody>
+          {data.files.map(file => (
+            <tr key={file.id}>
+              <td>{editing?.id === file.id ? <input value={editing.original_name} onChange={e => setEditing({ ...editing, original_name: e.target.value })} /> : file.original_name}</td>
+              <td>{editing?.id === file.id ? <input value={editing.comment} onChange={e => setEditing({ ...editing, comment: e.target.value })} /> : (file.comment || "—")}</td>
+              <td>{formatSize(file.size)}</td>
+              <td>{formatDate(file.uploaded_at)}</td>
+              <td>{formatDate(file.last_downloaded_at)}</td>
+              <td className="row-actions">
+                {editing?.id === file.id ? <>
+                  <button onClick={() => saveEdit(editing)}>Сохранить</button>
+                  <button onClick={() => setEditing(null)}>Отмена</button>
+                </> : <>
+                  <a href={file.download_url}>Скачать</a>
+                  <button onClick={() => setEditing(file)}>Изменить</button>
+                  <button onClick={() => share(file)}>Ссылка</button>
+                  <button className="danger" onClick={() => deleteFile(file.id)}>Удалить</button>
+                </>}
+              </td>
+            </tr>
+          ))}
+          {!data.files.length && <tr><td colSpan="6" className="empty">Файлов пока нет.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </section>;
 }
 
 function Admin() {
-  const navigate = useNavigate();
-
   const [users, setUsers] = useState([]);
   const [error, setError] = useState("");
 
   async function load() {
-    try {
-      const result = await api.users();
-
-      /*
-       * Backend возвращает массив пользователей напрямую.
-       * Оставлена совместимость с { users: [...] }.
-       */
-      setUsers(Array.isArray(result) ? result : result?.users || []);
-    } catch (err) {
-      setError(err.message);
-    }
+    try { setUsers((await api.users()).users); }
+    catch (err) { setError(err.message); }
   }
 
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(() => { load(); }, []);
 
-  async function deleteUser(id) {
-    if (!window.confirm("Удалить пользователя?")) {
-      return;
-    }
-
-    try {
-      await api.deleteUser(id);
-      await load();
-    } catch (err) {
-      setError(err.message);
-    }
+  async function toggle(user) {
+    try { await api.setAdmin(user.id, !user.is_admin); load(); }
+    catch (err) { setError(err.message); }
   }
 
-  async function toggleAdmin(user) {
-    try {
-      await api.setAdmin(user.id, !user.is_admin);
-      await load();
-    } catch (err) {
-      setError(err.message);
-    }
+  async function remove(user) {
+    if (!confirm(`Удалить пользователя ${user.login}?`)) return;
+    try { await api.deleteUser(user.id); load(); }
+    catch (err) { setError(err.message); }
   }
 
-  function formatSize(bytes) {
-    if (bytes === 0) {
-      return "0 Б";
-    }
-
-    if (!bytes) {
-      return "—";
-    }
-
-    const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
-    const index = Math.floor(Math.log(bytes) / Math.log(1024));
-
-    return `${(bytes / Math.pow(1024, index)).toFixed(
-      index === 0 ? 0 : 2
-    )} ${units[index]}`;
-  }
-
-  return (
-    <div className="admin-page">
-      <div className="page-header">
-        <h1>Администрирование</h1>
-      </div>
-
-      {error && <div className="error">{error}</div>}
-
-      <div className="table-wrapper">
-        <table>
-          <thead>
-            <tr>
-              <th>Логин</th>
-              <th>ФИО</th>
-              <th>Email</th>
-              <th>Администратор</th>
-              <th>Файлов</th>
-              <th>Размер</th>
-              <th>Действия</th>
-            </tr>
-          </thead>
-
-          <tbody>
-            {users.map((item) => (
-              <tr key={item.id}>
-                <td>{item.login}</td>
-
-                <td>{item.full_name}</td>
-
-                <td>{item.email}</td>
-
-                <td>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(item.is_admin)}
-                    onChange={() => toggleAdmin(item)}
-                  />
-                </td>
-
-                <td>{item.file_count ?? 0}</td>
-
-                <td>
-                  {formatSize(item.storage_size ?? 0)}
-                </td>
-
-                <td>
-                  <div className="file-actions">
-                    <button
-                      onClick={() =>
-                        navigate(`/files/${item.id}`)
-                      }
-                    >
-                      Хранилище
-                    </button>
-
-                    <button
-                      className="danger"
-                      onClick={() => deleteUser(item.id)}
-                    >
-                      Удалить
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+  return <section>
+    <h2>Администрирование</h2>
+    <p>Управление пользователями и их файловыми хранилищами.</p>
+    <FormError error={error} />
+    <div className="card table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Логин</th><th>Имя</th><th>Email</th><th>Администратор</th><th>Файлы</th><th>Размер</th><th>Действия</th></tr></thead>
+        <tbody>
+          {users.map(u => <tr key={u.id}>
+            <td>{u.id}</td><td>{u.login}</td><td>{u.full_name}</td><td>{u.email}</td>
+            <td><button onClick={() => toggle(u)}>{u.is_admin ? "Да" : "Нет"}</button></td>
+            <td><Link to={`/files?user_id=${u.id}`}>{u.file_count}</Link></td>
+            <td>{formatSize(u.storage_size || 0)}</td>
+            <td><button className="danger" onClick={() => remove(u)}>Удалить</button></td>
+          </tr>)}
+        </tbody>
+      </table>
     </div>
-  );
+  </section>;
+}
+
+function formatSize(bytes) {
+  if (bytes === 0) return "0 Б";
+  const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
+function formatDate(value) {
+  return value ? new Date(value).toLocaleString("ru-RU") : "—";
 }
 
 export default function App() {
@@ -801,35 +301,25 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.me()
-      .then((result) => {
-        // Backend возвращает пользователя напрямую.
-        const currentUser = result?.user || result;
-
-        if (currentUser?.id) {
-          setUser(currentUser);
-        }
-      })
-      .catch(() => {
-        setUser(null);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+    api.me().then(r => setUser(r.user)).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
-  if (loading) {
-    return (
-      <div className="loading-screen">
-        Загрузка...
-      </div>
-    );
+  async function logout() {
+    await api.logout().catch(() => {});
+    setUser(null);
+    window.location.href = "/";
   }
 
-  return (
-    <Layout
-      user={user}
-      onLogout={(nextUser = null) => setUser(nextUser)}
-    />
-  );
+  if (loading) return <div className="loading">Загрузка…</div>;
+
+  return <Layout user={user} onLogout={logout}>
+    <Routes>
+      <Route path="/" element={<Home user={user} />} />
+      <Route path="/register" element={user ? <Navigate to="/" /> : <Register />} />
+      <Route path="/login" element={user ? <Navigate to="/" /> : <Login onLogin={setUser} />} />
+      <Route path="/files" element={<Protected user={user}><FileManager user={user} /></Protected>} />
+      <Route path="/admin" element={<Protected user={user} admin><Admin /></Protected>} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  </Layout>;
 }

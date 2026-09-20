@@ -1,842 +1,354 @@
 import logging
-import shutil
 from pathlib import Path
-from uuid import uuid4
 
 from django.conf import settings
 from django.db.models import Count, Sum
-from django.http import FileResponse, Http404
-from django.utils import timezone
+from django.http import FileResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
-
 from rest_framework import status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
-from .auth import get_session_user, require_admin, require_auth
-from .models import StoredFile, User
-from .serializers import StoredFileSerializer, UserSerializer
-from .utils import generate_unique_filename, get_user_storage_dir
-
+from .auth import require_auth, require_admin
+from .models import User, StoredFile
+from .serializers import RegisterSerializer, UserSerializer, LoginSerializer, StoredFileSerializer
+from .utils import ensure_user_storage, create_storage_name, safe_remove
 
 logger = logging.getLogger("storage")
 
 
-def error_response(message, status_code):
-    return Response(
-        {"error": message},
-        status=status_code,
-    )
-
-
-# ============================================================
-# CSRF
-# ============================================================
-
 @api_view(["GET"])
 @ensure_csrf_cookie
 def csrf(request):
-    return Response(
-        {"message": "CSRF cookie установлена."},
-        status=status.HTTP_200_OK,
-    )
+    return Response({"detail": "CSRF cookie initialized."})
 
-
-# ============================================================
-# AUTH
-# ============================================================
 
 @api_view(["POST"])
 def register(request):
-    login = str(request.data.get("login", "")).strip()
-    full_name = str(request.data.get("full_name", "")).strip()
-    email = str(request.data.get("email", "")).strip()
-    password = str(request.data.get("password", ""))
+    serializer = RegisterSerializer(data=request.data)
+    if not serializer.is_valid():
+        logger.warning("Registration validation failed: %s", serializer.errors)
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-    errors = {}
-
-    if not login:
-        errors["login"] = "Введите логин."
-
-    if not full_name:
-        errors["full_name"] = "Введите полное имя."
-
-    if not email:
-        errors["email"] = "Введите email."
-
-    if not password:
-        errors["password"] = "Введите пароль."
-
-    if errors:
-        return error_response(
-            {
-                "message": "Проверьте заполненные поля.",
-                "fields": errors,
-            },
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    if User.objects.filter(login__iexact=login).exists():
-        return error_response(
-            "Пользователь с таким логином уже существует.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    if User.objects.filter(email__iexact=email).exists():
-        return error_response(
-            "Пользователь с таким email уже существует.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    try:
-        user = User.objects.create_user(
-            login=login,
-            full_name=full_name,
-            email=email,
-            password=password,
-        )
-    except ValueError as exc:
-        return error_response(
-            str(exc),
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    logger.info(
-        "User registered: id=%s login=%s",
-        user.id,
-        user.login,
+    data = serializer.validated_data
+    user = User(
+        login=data["login"],
+        full_name=data["full_name"],
+        email=data["email"],
+        storage_path=__import__("uuid").uuid4().hex,
     )
-
-    return Response(
-        UserSerializer(
-            user,
-            context={"request": request},
-        ).data,
-        status=status.HTTP_201_CREATED,
-    )
+    user.set_password(data["password"])
+    user.save()
+    ensure_user_storage(user)
+    logger.info("User registered: id=%s login=%s", user.id, user.login)
+    return Response({"user": UserSerializer(user).data}, status=status.HTTP_201_CREATED)
 
 
 @api_view(["POST"])
 def login(request):
-    login_value = str(request.data.get("login", "")).strip()
-    password = str(request.data.get("password", ""))
+    serializer = LoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-    if not login_value or not password:
-        return error_response(
-            "Введите логин и пароль.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    try:
-        user = User.objects.get(login__iexact=login_value)
-    except User.DoesNotExist:
-        logger.warning(
-            "Failed login attempt: login=%s",
-            login_value,
-        )
-        return error_response(
-            "Неверный логин или пароль.",
-            status.HTTP_401_UNAUTHORIZED,
-        )
-
-    if not user.check_password(password):
-        logger.warning(
-            "Failed login attempt: login=%s",
-            login_value,
-        )
-        return error_response(
-            "Неверный логин или пароль.",
-            status.HTTP_401_UNAUTHORIZED,
-        )
+    login_value = serializer.validated_data["login"]
+    user = User.objects.filter(login__iexact=login_value).first()
+    if not user:
+        logger.warning("Login failed: unknown login=%s", login_value)
+        return Response({"error": "Неверный логин или пароль."}, status=status.HTTP_401_UNAUTHORIZED)
+    if not user.check_password(serializer.validated_data["password"]):
+        logger.warning("Login failed: invalid password for login=%s", user.login)
+        return Response({"error": "Неверный логин или пароль."}, status=status.HTTP_401_UNAUTHORIZED)
 
     request.session.cycle_key()
     request.session["user_id"] = user.id
-    request.session.save()
-
-    logger.info(
-        "User logged in: id=%s login=%s",
-        user.id,
-        user.login,
-    )
-
-    return Response(
-        UserSerializer(
-            user,
-            context={"request": request},
-        ).data,
-        status=status.HTTP_200_OK,
-    )
+    logger.info("User logged in: id=%s login=%s", user.id, user.login)
+    return Response({"user": UserSerializer(user).data})
 
 
 @api_view(["POST"])
+@require_auth
 def logout(request):
-    user = get_session_user(request)
-
-    if user:
-        logger.info(
-            "User logged out: id=%s login=%s",
-            user.id,
-            user.login,
-        )
-
+    login_value = request.storage_user.login
     request.session.flush()
-
-    return Response(
-        {"message": "Вы успешно вышли из системы."},
-        status=status.HTTP_200_OK,
-    )
+    logger.info("User logged out: login=%s", login_value)
+    return Response({"detail": "Выход выполнен."})
 
 
 @api_view(["GET"])
+@require_auth
 def me(request):
-    user = get_session_user(request)
+    return Response({"user": UserSerializer(request.storage_user).data})
 
-    if user is None:
-        return error_response(
-            "Пользователь не авторизован.",
-            status.HTTP_401_UNAUTHORIZED,
-        )
-
-    return Response(
-        UserSerializer(
-            user,
-            context={"request": request},
-        ).data,
-        status=status.HTTP_200_OK,
-    )
-
-
-# ============================================================
-# ADMIN — USERS
-# ============================================================
 
 @api_view(["GET"])
 @require_admin
 def users_list(request):
-    users = (
-        User.objects
-        .annotate(
-            calculated_storage_size=Sum("files__size"),
-            calculated_file_count=Count("files"),
-        )
-        .order_by("id")
+    users = User.objects.annotate(
+        calculated_file_count=Count("files", distinct=True),
+        calculated_storage_size=Sum("files__size"),
     )
 
     result = []
-
     for user in users:
-        data = UserSerializer(
-            user,
-            context={"request": request},
-        ).data
-
-        data["storage_size"] = user.calculated_storage_size or 0
+        data = UserSerializer(user).data
         data["file_count"] = user.calculated_file_count or 0
-
+        data["storage_size"] = user.calculated_storage_size or 0
         result.append(data)
 
-    return Response(
-        result,
-        status=status.HTTP_200_OK,
-    )
+    return Response({"users": result})
 
 
 @api_view(["DELETE"])
 @require_admin
 def user_delete(request, user_id):
-    current_user = request.storage_user
-
+    if request.storage_user.id == user_id:
+        return Response({"error": "Нельзя удалить текущего администратора."}, status=status.HTTP_400_BAD_REQUEST)
     try:
-        user = User.objects.get(id=user_id)
+        user = User.objects.get(pk=user_id)
     except User.DoesNotExist:
-        return error_response(
-            "Пользователь не найден.",
-            status.HTTP_404_NOT_FOUND,
-        )
+        return Response({"error": "Пользователь не найден."}, status=status.HTTP_404_NOT_FOUND)
 
-    if user.id == current_user.id:
-        return error_response(
-            "Нельзя удалить текущего администратора.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    storage_dir = get_user_storage_dir(user)
-
-    user_id_value = user.id
-    login_value = user.login
-
+    storage = settings.MEDIA_ROOT / user.storage_path
+    user_login = user.login
     user.delete()
-
-    if storage_dir.exists():
-        try:
-            shutil.rmtree(storage_dir)
-        except OSError:
-            logger.exception(
-                "Could not remove storage directory for user id=%s",
-                user_id_value,
-            )
-
-    logger.info(
-        "User deleted: id=%s login=%s by admin id=%s",
-        user_id_value,
-        login_value,
-        current_user.id,
-    )
-
-    return Response(
-        {"message": "Пользователь удалён."},
-        status=status.HTTP_200_OK,
-    )
+    import shutil
+    shutil.rmtree(storage, ignore_errors=True)
+    logger.info("User deleted: id=%s login=%s", user_id, user_login)
+    return Response({"detail": "Пользователь удалён."})
 
 
 @api_view(["PATCH"])
 @require_admin
-def user_admin_update(request, user_id):
-    current_user = request.storage_user
-
+def user_admin_toggle(request, user_id):
     try:
-        user = User.objects.get(id=user_id)
+        user = User.objects.get(pk=user_id)
     except User.DoesNotExist:
-        return error_response(
-            "Пользователь не найден.",
-            status.HTTP_404_NOT_FOUND,
-        )
+        return Response({"error": "Пользователь не найден."}, status=status.HTTP_404_NOT_FOUND)
 
-    if "is_admin" not in request.data:
-        return error_response(
-            "Необходимо передать поле is_admin.",
-            status.HTTP_400_BAD_REQUEST,
-        )
+    if "is_admin" not in request.data or not isinstance(request.data["is_admin"], bool):
+        return Response({"error": "Поле is_admin должно быть boolean."}, status=status.HTTP_400_BAD_REQUEST)
 
-    value = request.data.get("is_admin")
+    if request.storage_user.id == user.id and request.data["is_admin"] is False:
+        return Response({"error": "Нельзя снять права администратора с самого себя."}, status=status.HTTP_400_BAD_REQUEST)
 
-    if not isinstance(value, bool):
-        return error_response(
-            "Поле is_admin должно иметь значение true или false.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    if user.id == current_user.id and value is False:
-        return error_response(
-            "Нельзя снять права администратора у текущего пользователя.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    user.is_admin = value
+    user.is_admin = request.data["is_admin"]
     user.save(update_fields=["is_admin"])
-
-    logger.info(
-        "Admin flag changed: user_id=%s is_admin=%s by admin_id=%s",
-        user.id,
-        user.is_admin,
-        current_user.id,
-    )
-
-    return Response(
-        UserSerializer(
-            user,
-            context={"request": request},
-        ).data,
-        status=status.HTTP_200_OK,
-    )
+    logger.info("Admin flag changed: target=%s is_admin=%s by=%s", user.login, user.is_admin, request.storage_user.login)
+    return Response({"user": UserSerializer(user).data})
 
 
-# ============================================================
-# STORAGE HELPERS
-# ============================================================
-
-def get_requested_storage_user(request):
-    """
-    Определяет пользователя, чьё файловое хранилище требуется открыть.
-
-    Обычный пользователь может работать только со своим хранилищем.
-    Администратор может указать user_id и работать с хранилищем
-    другого пользователя.
-    """
-
-    current_user = request.storage_user
-
-    user_id = request.query_params.get("user_id")
-
-    if user_id:
+def resolve_target_user(request):
+    if "user_id" in request.GET:
+        if not request.storage_user.is_admin:
+            return None, Response({"error": "Недостаточно прав для доступа к чужому хранилищу."}, status=status.HTTP_403_FORBIDDEN)
         try:
-            requested_user = User.objects.get(id=int(user_id))
-        except (User.DoesNotExist, ValueError):
-            return None, error_response(
-                "Пользователь не найден.",
-                status.HTTP_404_NOT_FOUND,
-            )
+            return User.objects.get(pk=request.GET["user_id"]), None
+        except User.DoesNotExist:
+            return None, Response({"error": "Пользователь не найден."}, status=status.HTTP_404_NOT_FOUND)
+    return request.storage_user, None
 
-        if (
-            requested_user.id != current_user.id
-            and not current_user.is_admin
-        ):
-            return None, error_response(
-                "Нет доступа к хранилищу другого пользователя.",
-                status.HTTP_403_FORBIDDEN,
-            )
-
-        return requested_user, None
-
-    return current_user, None
-
-
-# ============================================================
-# FILES — LIST
-# ============================================================
 
 @api_view(["GET"])
 @require_auth
 def files_list(request):
-    user, error = get_requested_storage_user(request)
-
+    target, error = resolve_target_user(request)
     if error:
         return error
+    files = target.files.all()
+    return Response({
+        "user": UserSerializer(target).data,
+        "files": StoredFileSerializer(files, many=True, context={"request": request}).data,
+    })
 
-    files = (
-        StoredFile.objects
-        .filter(owner=user)
-        .order_by("-uploaded_at")
-    )
-
-    return Response(
-        StoredFileSerializer(
-            files,
-            many=True,
-            context={"request": request},
-        ).data,
-        status=status.HTTP_200_OK,
-    )
-
-
-# ============================================================
-# FILES — UPLOAD
-# ============================================================
 
 @api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser])
 @require_auth
 def file_upload(request):
-    user, error = get_requested_storage_user(request)
-
+    target, error = resolve_target_user(request)
     if error:
         return error
 
-    uploaded_file = request.FILES.get("file")
+    uploaded = request.FILES.get("file")
+    comment = request.data.get("comment", "")
+    if not uploaded:
+        return Response({"error": "Файл не передан."}, status=status.HTTP_400_BAD_REQUEST)
+    if uploaded.size > settings.MAX_UPLOAD_SIZE:
+        return Response({"error": f"Максимальный размер файла: {settings.MAX_UPLOAD_SIZE} байт."}, status=status.HTTP_400_BAD_REQUEST)
 
-    if uploaded_file is None:
-        return error_response(
-            "Файл не был передан.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    comment = str(
-        request.data.get("comment", "")
-    ).strip()
-
-    storage_dir = get_user_storage_dir(user)
-
-    original_name = Path(uploaded_file.name).name
-
-    if not original_name:
-        return error_response(
-            "Некорректное имя файла.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    # Физическое имя файла не содержит исходного имени.
-    physical_name = generate_unique_filename(original_name)
-
-    physical_path = storage_dir / physical_name
+    storage = ensure_user_storage(target)
+    disk_name = create_storage_name(uploaded.name)
+    destination = storage / disk_name
 
     try:
-        with physical_path.open("wb+") as destination:
-            for chunk in uploaded_file.chunks():
-                destination.write(chunk)
-
-    except OSError:
-        logger.exception(
-            "File upload failed for user id=%s",
-            user.id,
-        )
-
-        return error_response(
-            "Не удалось сохранить файл.",
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-    try:
-        stored_file = StoredFile.objects.create(
-            owner=user,
-            original_name=original_name,
-            size=uploaded_file.size,
-            comment=comment,
-            file_path=str(
-                physical_path.relative_to(
-                    settings.MEDIA_ROOT
-                )
-            ),
+        with destination.open("wb+") as destination_file:
+            for chunk in uploaded.chunks():
+                destination_file.write(chunk)
+        obj = StoredFile.objects.create(
+            owner=target,
+            original_name=Path(uploaded.name).name[:255],
+            size=uploaded.size,
+            comment=str(comment)[:5000],
+            file_path=str(destination.relative_to(settings.MEDIA_ROOT)),
         )
     except Exception:
-        # Если запись в БД не создалась,
-        # удаляем уже сохранённый физический файл.
-        try:
-            if physical_path.exists():
-                physical_path.unlink()
-        except OSError:
-            logger.exception(
-                "Could not rollback uploaded file: %s",
-                physical_path,
-            )
+        safe_remove(destination)
+        logger.exception("File upload failed")
+        return Response({"error": "Не удалось сохранить файл."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        logger.exception(
-            "Database record creation failed for uploaded file."
-        )
-
-        return error_response(
-            "Не удалось сохранить информацию о файле.",
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-    logger.info(
-        "File uploaded: id=%s user_id=%s name=%s size=%s",
-        stored_file.id,
-        user.id,
-        original_name,
-        uploaded_file.size,
-    )
-
-    return Response(
-        StoredFileSerializer(
-            stored_file,
-            context={"request": request},
-        ).data,
-        status=status.HTTP_201_CREATED,
-    )
+    logger.info("File uploaded: id=%s owner=%s name=%s size=%s", obj.id, target.login, obj.original_name, obj.size)
+    return Response({"file": StoredFileSerializer(obj, context={"request": request}).data}, status=status.HTTP_201_CREATED)
 
 
-# ============================================================
-# FILES — UPDATE
-# ============================================================
+def get_file_for_user(request, file_id):
+    try:
+        obj = StoredFile.objects.select_related("owner").get(pk=file_id)
+    except StoredFile.DoesNotExist:
+        return None, Response({"error": "Файл не найден."}, status=status.HTTP_404_NOT_FOUND)
 
-@api_view(["PATCH"])
+    if obj.owner_id != request.storage_user.id and not request.storage_user.is_admin:
+        return None, Response({"error": "Нет доступа к файлу."}, status=status.HTTP_403_FORBIDDEN)
+    return obj, None
+
+
+@api_view(["PATCH", "DELETE"])
 @require_auth
 def file_update(request, file_id):
-    current_user = request.storage_user
+    obj, error = get_file_for_user(request, file_id)
+    if error:
+        return error
 
-    try:
-        stored_file = (
-            StoredFile.objects
-            .select_related("owner")
-            .get(id=file_id)
+    if request.method == "DELETE":
+        physical = settings.MEDIA_ROOT / obj.file_path
+        name = obj.original_name
+        obj.delete()
+        safe_remove(physical)
+        logger.info(
+            "File deleted: id=%s name=%s by=%s",
+            file_id,
+            name,
+            request.storage_user.login,
         )
-    except StoredFile.DoesNotExist:
-        return error_response(
-            "Файл не найден.",
-            status.HTTP_404_NOT_FOUND,
+        return Response({"detail": "Файл удалён."}, status=status.HTTP_200_OK)
+
+    changed = []
+
+    # Accept both names for backward compatibility with the existing frontend.
+    if "name" in request.data or "original_name" in request.data:
+        requested_name = request.data.get(
+            "name", request.data.get("original_name", "")
         )
-
-    if (
-        stored_file.owner_id != current_user.id
-        and not current_user.is_admin
-    ):
-        return error_response(
-            "Нет доступа к этому файлу.",
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    changed_fields = []
-
-    # Переименование
-    if "name" in request.data:
-        new_name = Path(
-            str(request.data.get("name", "")).strip()
-        ).name
-
-        if not new_name:
-            return error_response(
-                "Имя файла не может быть пустым.",
-                status.HTTP_400_BAD_REQUEST,
+        name = Path(str(requested_name)).name.strip()
+        if not name:
+            return Response(
+                {"error": "Имя файла не может быть пустым."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        old_full_path = (
-            settings.MEDIA_ROOT
-            / stored_file.file_path
-        )
+        old_suffix = Path(obj.original_name).suffix.lower()
+        new_suffix = Path(name).suffix.lower()
 
-        new_full_path = old_full_path.with_name(new_name)
+        # If the extension is omitted, preserve the existing extension.
+        if old_suffix and not new_suffix:
+            name = f"{name}{old_suffix}"
+            new_suffix = old_suffix
 
-        if (
-            new_full_path != old_full_path
-            and new_full_path.exists()
-        ):
-            return error_response(
-                "Файл с таким именем уже существует.",
-                status.HTTP_400_BAD_REQUEST,
+        # Do not allow changing the file type during a rename.
+        if old_suffix and new_suffix != old_suffix:
+            return Response(
+                {"error": f"Расширение файла нельзя изменять. Используйте: {old_suffix}"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            old_full_path.rename(new_full_path)
-        except OSError:
-            logger.exception(
-                "File rename failed: file_id=%s",
-                stored_file.id,
+        old_path = settings.MEDIA_ROOT / obj.file_path
+        new_path = old_path.with_name(name)
+
+        if new_path != old_path and new_path.exists():
+            return Response(
+                {"error": "Файл с таким именем уже существует."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-            return error_response(
-                "Не удалось переименовать файл.",
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        if new_path != old_path:
+            try:
+                old_path.rename(new_path)
+            except OSError:
+                logger.exception("File rename failed: id=%s", obj.id)
+                return Response(
+                    {"error": "Не удалось переименовать файл."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
-        stored_file.original_name = new_name
-        stored_file.file_path = str(
-            new_full_path.relative_to(
-                settings.MEDIA_ROOT
-            )
-        )
+            obj.file_path = str(new_path.relative_to(settings.MEDIA_ROOT))
+            changed.append("file_path")
 
-        changed_fields.extend(
-            ["original_name", "file_path"]
-        )
+        obj.original_name = name[:255]
+        changed.append("original_name")
 
-    # Изменение комментария
     if "comment" in request.data:
-        stored_file.comment = str(
-            request.data.get("comment", "")
-        ).strip()
+        obj.comment = str(request.data["comment"])[:5000]
+        changed.append("comment")
 
-        changed_fields.append("comment")
-
-    if not changed_fields:
-        return error_response(
-            "Не указаны данные для изменения.",
-            status.HTTP_400_BAD_REQUEST,
+    if not changed:
+        return Response(
+            {"error": "Нет данных для изменения."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    stored_file.save(
-        update_fields=changed_fields
-    )
-
+    obj.save(update_fields=list(dict.fromkeys(changed)))
     logger.info(
-        "File updated: id=%s by user_id=%s",
-        stored_file.id,
-        current_user.id,
+        "File updated: id=%s fields=%s by=%s",
+        obj.id,
+        changed,
+        request.storage_user.login,
     )
-
     return Response(
-        StoredFileSerializer(
-            stored_file,
-            context={"request": request},
-        ).data,
+        {"file": StoredFileSerializer(obj, context={"request": request}).data},
         status=status.HTTP_200_OK,
     )
 
-
-# ============================================================
-# FILES — DELETE
-# ============================================================
-
-@api_view(["DELETE"])
-@require_auth
-def file_delete(request, file_id):
-    current_user = request.storage_user
-
-    try:
-        stored_file = (
-            StoredFile.objects
-            .select_related("owner")
-            .get(id=file_id)
-        )
-    except StoredFile.DoesNotExist:
-        return error_response(
-            "Файл не найден.",
-            status.HTTP_404_NOT_FOUND,
-        )
-
-    if (
-        stored_file.owner_id != current_user.id
-        and not current_user.is_admin
-    ):
-        return error_response(
-            "Нет доступа к этому файлу.",
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    full_path = (
-        settings.MEDIA_ROOT
-        / stored_file.file_path
-    )
-
-    file_id_value = stored_file.id
-    file_name = stored_file.original_name
-
-    stored_file.delete()
-
-    try:
-        if full_path.exists():
-            full_path.unlink()
-    except OSError:
-        logger.exception(
-            "Could not delete physical file: id=%s",
-            file_id_value,
-        )
-
-    logger.info(
-        "File deleted: id=%s name=%s by user_id=%s",
-        file_id_value,
-        file_name,
-        current_user.id,
-    )
-
-    return Response(
-        {"message": "Файл удалён."},
-        status=status.HTTP_200_OK,
-    )
-
-
-# ============================================================
-# FILES — DOWNLOAD
-# ============================================================
 
 @api_view(["GET"])
 @require_auth
 def file_download(request, file_id):
-    current_user = request.storage_user
+    obj, error = get_file_for_user(request, file_id)
+    if error:
+        return error
 
-    try:
-        stored_file = (
-            StoredFile.objects
-            .select_related("owner")
-            .get(id=file_id)
-        )
-    except StoredFile.DoesNotExist:
-        return error_response(
-            "Файл не найден.",
-            status.HTTP_404_NOT_FOUND,
-        )
+    physical = settings.MEDIA_ROOT / obj.file_path
+    if not physical.is_file():
+        logger.error("Physical file missing: id=%s path=%s", obj.id, physical)
+        return Response({"error": "Физический файл отсутствует на сервере."}, status=status.HTTP_404_NOT_FOUND)
 
-    if (
-        stored_file.owner_id != current_user.id
-        and not current_user.is_admin
-    ):
-        return error_response(
-            "Нет доступа к этому файлу.",
-            status.HTTP_403_FORBIDDEN,
-        )
+    obj.mark_downloaded()
+    logger.info("File downloaded: id=%s name=%s by=%s", obj.id, obj.original_name, request.storage_user.login)
+    response = FileResponse(open(physical, "rb"), as_attachment=True, filename=obj.original_name)
+    return response
 
-    full_path = (
-        settings.MEDIA_ROOT
-        / stored_file.file_path
-    )
-
-    if not full_path.exists() or not full_path.is_file():
-        return error_response(
-            "Физический файл не найден.",
-            status.HTTP_404_NOT_FOUND,
-        )
-
-    stored_file.last_downloaded_at = timezone.now()
-    stored_file.save(
-        update_fields=["last_downloaded_at"]
-    )
-
-    logger.info(
-        "File downloaded: id=%s name=%s by user_id=%s",
-        stored_file.id,
-        stored_file.original_name,
-        current_user.id,
-    )
-
-    return FileResponse(
-        full_path.open("rb"),
-        as_attachment=True,
-        filename=stored_file.original_name,
-    )
-
-
-# ============================================================
-# FILES — PUBLIC SHARE
-# ============================================================
 
 @api_view(["POST"])
 @require_auth
 def file_share(request, file_id):
-    current_user = request.storage_user
+    obj, error = get_file_for_user(request, file_id)
+    if error:
+        return error
+    return Response({
+        "public_url": request.build_absolute_uri(f"/api/shared/{obj.public_token}/")
+    })
 
-    try:
-        stored_file = (
-            StoredFile.objects
-            .select_related("owner")
-            .get(id=file_id)
-        )
-    except StoredFile.DoesNotExist:
-        return error_response(
-            "Файл не найден.",
-            status.HTTP_404_NOT_FOUND,
-        )
-
-    if (
-        stored_file.owner_id != current_user.id
-        and not current_user.is_admin
-    ):
-        return error_response(
-            "Нет доступа к этому файлу.",
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    if request.data.get("regenerate") is True:
-        stored_file.public_token = uuid4()
-        stored_file.save(
-            update_fields=["public_token"]
-        )
-
-    serializer = StoredFileSerializer(
-        stored_file,
-        context={"request": request},
-    )
-
-    return Response(
-        {
-            "public_url": serializer.data["public_url"],
-            "token": str(stored_file.public_token),
-        },
-        status=status.HTTP_200_OK,
-    )
-
-
-# ============================================================
-# PUBLIC FILE DOWNLOAD
-# ============================================================
 
 @api_view(["GET"])
-def public_file_download(request, token):
+def public_download(request, token):
     try:
-        stored_file = StoredFile.objects.get(
-            public_token=token
-        )
+        obj = StoredFile.objects.get(public_token=token)
     except StoredFile.DoesNotExist:
-        raise Http404("Файл не найден.")
+        return Response({"error": "Файл не найден."}, status=status.HTTP_404_NOT_FOUND)
 
-    full_path = (
-        settings.MEDIA_ROOT
-        / stored_file.file_path
-    )
+    physical = settings.MEDIA_ROOT / obj.file_path
+    if not physical.is_file():
+        return Response({"error": "Физический файл отсутствует на сервере."}, status=status.HTTP_404_NOT_FOUND)
 
-    if not full_path.exists() or not full_path.is_file():
-        raise Http404("Физический файл не найден.")
-
-    stored_file.last_downloaded_at = timezone.now()
-    stored_file.save(
-        update_fields=["last_downloaded_at"]
-    )
-
-    logger.info(
-        "Public file downloaded: id=%s name=%s",
-        stored_file.id,
-        stored_file.original_name,
-    )
-
-    return FileResponse(
-        full_path.open("rb"),
-        as_attachment=True,
-        filename=stored_file.original_name,
-    )
+    obj.mark_downloaded()
+    logger.info("Public file download: id=%s name=%s", obj.id, obj.original_name)
+    return FileResponse(open(physical, "rb"), as_attachment=True, filename=obj.original_name)

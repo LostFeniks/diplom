@@ -13,7 +13,6 @@ async function request(url, options = {}) {
   });
 
   const contentType = response.headers.get("content-type") || "";
-
   let data = null;
 
   if (contentType.includes("application/json")) {
@@ -29,10 +28,7 @@ async function request(url, options = {}) {
       const errors = Object.values(data.errors)
         .flat()
         .filter(Boolean);
-
-      if (errors.length > 0) {
-        message = errors.join(" ");
-      }
+      if (errors.length) message = errors.join(" ");
     } else if (typeof data === "string") {
       message = data;
     }
@@ -43,8 +39,15 @@ async function request(url, options = {}) {
   return data;
 }
 
+function withUserId(url, userId) {
+  if (userId === null || userId === undefined || userId === "") {
+    return url;
+  }
+
+  return `${url}?user_id=${encodeURIComponent(userId)}`;
+}
+
 export const api = {
-  // Аутентификация
   me: () => request("/api/auth/me/"),
 
   register: (body) =>
@@ -64,9 +67,7 @@ export const api = {
       method: "POST",
     }),
 
-  // Администрирование пользователей
-  users: () =>
-    request("/api/users/"),
+  users: () => request("/api/users/"),
 
   deleteUser: (id) =>
     request(`/api/users/${id}/`, {
@@ -76,30 +77,17 @@ export const api = {
   setAdmin: (id, isAdmin) =>
     request(`/api/users/${id}/admin/`, {
       method: "PATCH",
-      body: JSON.stringify({
-        is_admin: isAdmin,
-      }),
+      body: JSON.stringify({ is_admin: isAdmin }),
     }),
 
-  // Файлы
-  files: (userId = null) => {
-    const query = userId !== null && userId !== undefined
-      ? `?user_id=${encodeURIComponent(userId)}`
-      : "";
+  files: (userId = null) =>
+    request(withUserId("/api/files/", userId)),
 
-    return request(`/api/files/${query}`);
-  },
-
-  upload: (formData, userId = null) => {
-    const query = userId !== null && userId !== undefined
-      ? `?user_id=${encodeURIComponent(userId)}`
-      : "";
-
-    return request(`/api/files/upload/${query}`, {
+  upload: (formData, userId = null) =>
+    request(withUserId("/api/files/upload/", userId), {
       method: "POST",
       body: formData,
-    });
-  },
+    }),
 
   updateFile: (id, body) =>
     request(`/api/files/${id}/`, {
@@ -112,11 +100,11 @@ export const api = {
       method: "DELETE",
     }),
 
-  shareFile: (id) =>
+  shareFile: (id, regenerate = false) =>
     request(`/api/files/${id}/share/`, {
       method: "POST",
+      body: JSON.stringify({ regenerate }),
     }),
 
-  downloadFile: (id) =>
-    `/api/files/${id}/download/`,
+  downloadFile: (id) => `/api/files/${id}/download/`,
 };
