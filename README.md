@@ -27,7 +27,7 @@ psql --version
 ### 2. Получение проекта
 
 ```powershell
-git clone <АДРЕС_РЕПОЗИТОРИЯ>
+git clone <(https://github.com/LostFeniks/diplom)>
 cd diplom
 ```
 
